@@ -28,6 +28,7 @@
 #include <attrib.h>
 #include <lightengine.h>
 #include <tables.h>
+#include <playback.h>
 
 /* Each point is 18 bytes. We buffer 1800 points = 32400 bytes.
  *
@@ -317,6 +318,23 @@ void dac_stop(int flags) {
 	dac_flags |= flags;
 }
 
+
+#define MASK_XY(v)	((((v) >> 4) + 0x800) & 0xFFF)
+
+// write point P to the DAC chip
+static __atribute__((always_inline)) void write_point (dac_point_t *p)
+{
+  	LPC_SSP1->DR = MASK_XY(p->x) | 0x6000;
+	LPC_SSP1->DR = MASK_XY(p->y) | 0x7000;
+	LPC_SSP1->DR = (p->i >> 4) | 0x5000;
+	LPC_SSP1->DR = (p->r >> 4) | 0x4000;
+	LPC_SSP1->DR = (p->g >> 4) | 0x3000;
+	LPC_SSP1->DR = (p->b >> 4) | 0x2000;
+	LPC_SSP1->DR = (p->u1 >> 4) | 0x1000;
+	LPC_SSP1->DR = (p->u2 >> 4);      
+}
+
+
 void PWM1_IRQHandler(void) {
 	/* Tell the interrupt handler we've handled it */
 	if (LPC_PWM1->IR & PWM_IR_PWMMRn(0)) {
@@ -325,54 +343,58 @@ void PWM1_IRQHandler(void) {
 		panic("Unexpected PWM IRQ");
 	}
 
-	ASSERT_EQUAL(dac_state, DAC_PLAYING);
 
-	int consume = dac_consume;
+	switch (playback_source){
+	case SRC_NETWORK:
+	case SRC_ILDAPLAYER:
+	  ASSERT_EQUAL(dac_state, DAC_PLAYING);
 
-	/* Are we out of buffer space? If so, shut the lasers down. */
-	if (consume == dac_produce) {
-		dac_stop(DAC_FLAG_STOP_UNDERFLOW);
-		return;
-	}
+	  int consume = dac_consume;
 
-	#define MASK_XY(v)	((((v) >> 4) + 0x800) & 0xFFF)
+	  /* Are we out of buffer space? If so, shut the lasers down. */
+	  if (consume == dac_produce) {
+	    dac_stop(DAC_FLAG_STOP_UNDERFLOW);
+	    return;
+	  }
 
-	LPC_SSP1->DR = MASK_XY(dac_buffer[consume].x) | 0x6000;
-	LPC_SSP1->DR = MASK_XY(dac_buffer[consume].y) | 0x7000;
-	LPC_SSP1->DR = (dac_buffer[consume].i >> 4) | 0x5000;
-	LPC_SSP1->DR = (dac_buffer[consume].r >> 4) | 0x4000;
-	LPC_SSP1->DR = (dac_buffer[consume].g >> 4) | 0x3000;
-	LPC_SSP1->DR = (dac_buffer[consume].b >> 4) | 0x2000;
-	LPC_SSP1->DR = (dac_buffer[consume].u1 >> 4) | 0x1000;
-	LPC_SSP1->DR = (dac_buffer[consume].u2 >> 4);
+	  write_point (&dac_buffer[consume]);
 
-	if (dac_shutter_req) {
-		LPC_GPIO2->FIOSET = (1 << DAC_SHUTTER_PIN);
-		dac_flags |= DAC_FLAG_SHUTTER;
-	} else {
-		LPC_GPIO2->FIOCLR = (1 << DAC_SHUTTER_PIN);
-		dac_flags &= ~DAC_FLAG_SHUTTER;
-	}
+	  /* Change the point rate? */
+	  if (dac_buffer[consume].control & DAC_CTRL_RATE_CHANGE) {
+	    int rate_consume = dac_rate_consume;
+	    if (rate_consume != dac_rate_produce) {
+	      dac_set_rate(dac_rate_buffer[rate_consume]);
+	      rate_consume++;
+	      if (rate_consume >= DAC_RATE_BUFFER_SIZE)
+	        rate_consume = 0;
+	    }
+	  }
 
-	/* Change the point rate? */
-	if (dac_buffer[consume].control & DAC_CTRL_RATE_CHANGE) {
-		int rate_consume = dac_rate_consume;
-		if (rate_consume != dac_rate_produce) {
-			dac_set_rate(dac_rate_buffer[rate_consume]);
-			rate_consume++;
-			if (rate_consume >= DAC_RATE_BUFFER_SIZE)
-				rate_consume = 0;
-		}
-	}
+	  dac_count++;
+	  consume++;
 
-	dac_count++;
+	  if (consume >= DAC_BUFFER_POINTS)
+		  consume = 0;
 
-	consume++;
-
-	if (consume >= DAC_BUFFER_POINTS)
-		consume = 0;
-
-	dac_consume = consume;
+	  dac_consume = consume;
+	  break;
+	
+	case SRC_SYNTH:
+	  dac_point_t p;
+	    p = abstract_run (&abstract);
+	    write_point (&p); 
+	  break;
+	default:
+	    panic ("Unknown playback mode");
+	   break;
+     }     
+     if (dac_shutter_req) {
+       LPC_GPIO2->FIOSET = (1 << DAC_SHUTTER_PIN);
+       dac_flags |= DAC_FLAG_SHUTTER;
+     } else {
+       LPC_GPIO2->FIOCLR = (1 << DAC_SHUTTER_PIN);
+       dac_flags &= ~DAC_FLAG_SHUTTER;
+     }
 }
 
 enum dac_state dac_get_state(void) {

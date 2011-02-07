@@ -1,4 +1,4 @@
-/* j4cDAC DMA/DAC driver
+/* j4cDAC DAC driver
  *
  * Copyright 2010 Jacob Potter
  *
@@ -16,6 +16,7 @@
  */
 
 #include <serial.h>
+#include <string.h>
 #include <lpc17xx_pinsel.h>
 #include <lpc17xx_gpdma.h>
 #include <lpc17xx_ssp.h>
@@ -26,6 +27,7 @@
 #include <dac.h>
 #include <assert.h>
 #include <attrib.h>
+#include <transform.h>
 #include <lightengine.h>
 #include <tables.h>
 #include <playback.h>
@@ -44,6 +46,16 @@ static volatile int dac_consume;
 static uint32_t dac_rate_buffer[DAC_RATE_BUFFER_SIZE];
 static int dac_rate_produce;
 static volatile int dac_rate_consume;
+
+/* Color channel delay lines.
+ */
+#define DAC_MAX_COLOR_DELAY	20
+struct delay_line {
+	uint16_t buffer[DAC_MAX_COLOR_DELAY];
+	uint8_t index;
+	uint8_t points;
+};
+static struct delay_line red_delay, green_delay, blue_delay;
 
 /* Internal state. */
 int dac_current_pps;
@@ -251,6 +263,14 @@ void dac_init() {
 	dac_state = DAC_IDLE;
 	dac_count = 0;
 	dac_current_pps = 0;
+
+	memset(red_delay.buffer, 0, sizeof(red_delay.buffer));
+	memset(green_delay.buffer, 0, sizeof(green_delay.buffer));
+	memset(blue_delay.buffer, 0, sizeof(blue_delay.buffer));
+
+	red_delay.points = 2;
+	green_delay.points = 2;
+	blue_delay.points = 2;
 }
 
 /* dac_configure
@@ -316,20 +336,47 @@ void dac_stop(int flags) {
 	dac_state = DAC_IDLE;
 	dac_count = 0;
 	dac_flags |= flags;
+
+	memset(red_delay.buffer, 0, sizeof(red_delay.buffer));
+	memset(green_delay.buffer, 0, sizeof(green_delay.buffer));
+	memset(blue_delay.buffer, 0, sizeof(blue_delay.buffer));
+}
+
+/* Delay the red, green, and blue lines if needed
+ */
+static void delay_line_write(struct delay_line *dl, uint16_t in) {
+	int points = dl->points;
+
+	if (points) {
+		int index = dl->index;
+
+		if (index > points)
+			index = 0;
+
+		LPC_SSP1->DR = dl->buffer[index];
+		dl->buffer[index] = in;
+		dl->index = index + 1;
+	} else {
+		LPC_SSP1->DR = in;
+	}
 }
 
 
 #define MASK_XY(v)	((((v) >> 4) + 0x800) & 0xFFF)
 
 // write point P to the DAC chip
-static __atribute__((always_inline)) void write_point (dac_point_t *p)
+static __atribute__((always_inline)) void write_point (const dac_point_t p)
 {
-  	LPC_SSP1->DR = MASK_XY(p->x) | 0x6000;
-	LPC_SSP1->DR = MASK_XY(p->y) | 0x7000;
+	int32_t x = translate_x(p->x, p->y);
+	int32_t y = translate_y(p->x, p->y);
+
+
+  	LPC_SSP1->DR = MASK_XY(x) | 0x6000;
+	LPC_SSP1->DR = MASK_XY(y) | 0x7000;
+	delay_line_write(&red_delay, (p->r >> 4) | 0x4000);
+	delay_line_write(&green_delay, (p->g >> 4) | 0x3000);
+	delay_line_write(&blue_delay, (p->b >> 4) | 0x2000);
 	LPC_SSP1->DR = (p->i >> 4) | 0x5000;
-	LPC_SSP1->DR = (p->r >> 4) | 0x4000;
-	LPC_SSP1->DR = (p->g >> 4) | 0x3000;
-	LPC_SSP1->DR = (p->b >> 4) | 0x2000;
 	LPC_SSP1->DR = (p->u1 >> 4) | 0x1000;
 	LPC_SSP1->DR = (p->u2 >> 4);      
 }
@@ -342,7 +389,6 @@ void PWM1_IRQHandler(void) {
 	} else {
 		panic("Unexpected PWM IRQ");
 	}
-
 
 	switch (playback_source){
 	case SRC_NETWORK:
@@ -357,7 +403,7 @@ void PWM1_IRQHandler(void) {
 	    return;
 	  }
 
-	  write_point (&dac_buffer[consume]);
+	  write_point (dac_buffer[consume]);
 
 	  /* Change the point rate? */
 	  if (dac_buffer[consume].control & DAC_CTRL_RATE_CHANGE) {
@@ -382,7 +428,7 @@ void PWM1_IRQHandler(void) {
 	case SRC_SYNTH:
 	  dac_point_t p;
 	    p = abstract_run (&abstract);
-	    write_point (&p); 
+	    write_point (p); 
 	  break;
 	default:
 	    panic ("Unknown playback mode");

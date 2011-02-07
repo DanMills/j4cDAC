@@ -48,6 +48,9 @@ SRCS += lib/lpcusb/usbhw_lpc.c lib/lpcusb/usbinit.c lib/lpcusb/usbstdreq.c \
 SRCS += net/point-stream.c net/broadcast.c net/sink.c net/osc.c net/bpm.c \
 	net/ilda-osc.c
 
+# Fixed point maths
+SRCS += lib/fixpoint.c
+
 OBJS1 = $(SRCS:.c=.o)
 OBJS = $(OBJS1:.s=.o)
 
